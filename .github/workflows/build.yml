@@ -164,7 +164,7 @@ jobs:
           endian = 'little'
           EOF
                   echo "Generating build files (meson) ..."
-                  meson setup build-android-aarch64 --cross-file "$workdir/mesa/android-aarch64" -Dbuildtype=release -Dplatforms=android -Dplatform-sdk-version=$sdkver -Dandroid-stub=true -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dvulkan-beta=true -Dfreedreno-kmds=kgsl -Db_lto=true -Degl=disabled &> "$workdir/meson_log" || { tail -50 "$workdir/meson_log"; exit 1; }
+                  meson setup build-android-aarch64 --cross-file "$workdir/mesa/android-aarch64" -Dbuildtype=release -Dplatforms=android -Dplatform-sdk-version=$sdkver -Dandroid-stub=true -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dvulkan-beta=true -Dfreedreno-kmds=kgsl -Db_lto=false -Degl=disabled &> "$workdir/meson_log" || { tail -50 "$workdir/meson_log"; exit 1; }
               fi
               echo "Compiling (ninja) ..."
               ninja -C build-android-aarch64 &> "$workdir/ninja_log" || { tail -50 "$workdir/ninja_log"; exit 1; }
