@@ -1,0 +1,254 @@
+name: One-shot Turnip 8G2 build
+
+# Self-contained: latest mesa main + the 8g2 UI glitch fix, built once.
+# No other files needed in this repository. Run it from the Actions tab.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Prepare environment
+        run: |
+          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
+          sudo apt-get build-dep mesa -y
+          sudo apt-get install -y patchelf zip ccache
+          pip install -U meson ninja mako --break-system-packages || true
+
+      - name: Write patches
+        run: |
+          mkdir -p patches
+          cat > patches/8g2_ui_glitch.patch <<'PATCH_8G2'
+          8g2 UI glitch fix: enable the TP UBWC flag hint on Adreno 740 (Snapdragon 8 Gen 2).
+          
+          Upstream keeps `enable_tp_ubwc_flag_hint = False` for a7xx_gen2 ("Most devices
+          with a740 have blob v6xx which doesn't have this hint set"), but on 8 Gen 2
+          phones this causes UI glitches inside Switch/mobile emulators. This is the
+          exact patch behind Weab-chan's beloved `8g2_ui_glitch` builds.
+          
+          Verified against mesa main (target line `[a7xx_base, a7xx_gen2],` is unique
+          in src/freedreno/common/freedreno_devices.py).
+          
+          diff --git a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
+          --- a/src/freedreno/common/freedreno_devices.py
+          +++ b/src/freedreno/common/freedreno_devices.py
+          @@ -1259,7 +1259,7 @@
+                   GPUId(chip_id=0xffff43050c01, name="Adreno X1-85"),
+               ], A6xxGPUInfo(
+                   CHIP.A7XX,
+          -        [a7xx_base, a7xx_gen2],
+          +        [a7xx_base, a7xx_gen2, GPUProps(enable_tp_ubwc_flag_hint = True)],
+                   num_ccu = 6,
+                   tile_align_w = 96,
+                   tile_align_h = 32,
+          PATCH_8G2
+          cat > patches/force_sysmem_no_autotuner.patch <<'PATCH_SYSMEM'
+          Force sysmem (bypass) rendering and skip autotuner on Adreno 740 / 8 Gen 2.
+          
+          Experimental compatibility variant: makes every renderpass use sysmem
+          rendering regardless of the autotuner's decision. Fixes rendering in some
+          games/emulators that break with GMEM, at the cost of some performance on
+          8g2. Same idea as Weab-chan's experimental build.
+          
+          Regenerated against current mesa main: use_sysmem_rendering() now takes
+          tu_autotune::rp_ctx_t / rp_key_opt parameters, so the original patch from
+          Weab-chan no longer applies verbatim.
+          
+          diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+          --- a/src/freedreno/vulkan/tu_cmd_buffer.cc
+          +++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+          @@ -1372,7 +1372,9 @@
+           use_sysmem_rendering(struct tu_cmd_buffer *cmd,
+                                tu_autotune::rp_ctx_t *rp_ctx,
+                                tu_autotune::rp_key_opt rp_key)
+           {
+          +   return true;
+          +
+              if (TU_DEBUG(SYSMEM)) {
+                 cmd->state.rp.force_render_mode_reason = "TU_DEBUG(SYSMEM)";
+                 return true;
+          PATCH_SYSMEM
+      - name: Build latest mesa + 8g2 fix (two variants)
+        run: |
+          set -e
+          green='\033[0;32m'
+          red='\033[0;31m'
+          nocolor='\033[0m'
+          workdir="$(pwd)/turnip_workdir"
+          packagedir="$workdir/turnip_module"
+          ndkver="android-ndk-r29"
+          sdkver="35"
+          mesasrc="https://gitlab.freedesktop.org/mesa/mesa.git"
+          base_patch="$PWD/patches/8g2_ui_glitch.patch"
+          sysmem_patch="$PWD/patches/force_sysmem_no_autotuner.patch"
+          commit=""; commit_short=""; mesa_version=""; vulkan_version=""; ndk_bin=""
+
+          check_deps() {
+              local missing=0
+              for dep in meson ninja patchelf unzip curl flex bison zip git python3 pip; do
+                  command -v "$dep" >/dev/null 2>&1 || { echo "MISSING: $dep"; missing=1; }
+              done
+              [ "$missing" == "0" ] || exit 1
+              pip install mako >/dev/null 2>&1 || true
+          }
+
+          clone_mesa() {
+              mkdir -p "$workdir" && cd "$workdir"
+              rm -rf mesa
+              git clone --depth=1 "$mesasrc"
+              cd mesa
+              commit=$(git rev-parse HEAD)
+              commit_short=$(git rev-parse --short HEAD)
+              mesa_version=$(cat VERSION | xargs)
+              local version major minor patch
+              version=$(awk -F'COMPLETE VK_MAKE_API_VERSION(|)' '{print $2}' <<< "$(cat include/vulkan/vulkan_core.h)" | xargs)
+              major=$(echo "$version" | cut -d "," -f 2 | xargs)
+              minor=$(echo "$version" | cut -d "," -f 3 | xargs)
+              patch=$(awk -F'VK_HEADER_VERSION |\n#define' '{print $2}' <<< "$(cat include/vulkan/vulkan_core.h)" | xargs)
+              vulkan_version="$major.$minor.$patch"
+              echo "Mesa $mesa_version @ $commit_short (vk $vulkan_version)"
+          }
+
+          apply_patch_strict() {
+              local patch_file="$1" expect_file="$2" expect_marker="$3"
+              cd "$workdir/mesa"
+              echo "Applying patch: $patch_file"
+              if ! git apply "$patch_file"; then
+                  echo "FAILED to apply $patch_file - upstream mesa changed too much."
+                  exit 1
+              fi
+              if ! git diff --name-only | grep -q "$expect_file"; then
+                  echo "VERIFICATION FAILED: $patch_file did not touch $expect_file"
+                  exit 1
+              fi
+              if ! git diff | grep -q -- "$expect_marker"; then
+                  echo "VERIFICATION FAILED: 8g2 fix marker not found in diff"
+                  exit 1
+              fi
+              git diff > "$workdir/applied_patches.diff"
+              echo "VERIFIED: $expect_file patched with the expected fix"
+          }
+
+          setup_ndk() {
+              cd "$workdir"
+              if [ ! -d android-ndk-* ]; then
+                  echo "Downloading android-ndk (~640 MB) ..."
+                  curl "https://dl.google.com/android/repository/$ndkver-linux.zip" --output "$ndkver-linux.zip" &> /dev/null
+                  unzip -q "$ndkver-linux.zip"
+              fi
+              ndk_bin="$workdir/$ndkver/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          }
+
+          build() {
+              cd "$workdir/mesa"
+              if [ ! -d build-android-aarch64 ]; then
+                  cat <<EOF >android-aarch64
+          [binaries]
+          ar = '$ndk_bin/llvm-ar'
+          c = ['ccache', '$ndk_bin/aarch64-linux-android$sdkver-clang']
+          cpp = ['ccache', '$ndk_bin/aarch64-linux-android$sdkver-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']
+          c_ld = 'lld'
+          cpp_ld = 'lld'
+          strip = '$ndk_bin/aarch64-linux-android-strip'
+          pkgconfig = ['env', 'PKG_CONFIG_LIBDIR=NDKDIR/pkgconfig', '/usr/bin/pkg-config']
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'armv8'
+          endian = 'little'
+          EOF
+                  echo "Generating build files (meson) ..."
+                  meson setup build-android-aarch64 --cross-file "$workdir/mesa/android-aarch64" -Dbuildtype=release -Dplatforms=android -Dplatform-sdk-version=$sdkver -Dandroid-stub=true -Dgallium-drivers= -Dvulkan-drivers=freedreno -Dvulkan-beta=true -Dfreedreno-kmds=kgsl -Db_lto=true -Degl=disabled &> "$workdir/meson_log" || { tail -50 "$workdir/meson_log"; exit 1; }
+              fi
+              echo "Compiling (ninja) ..."
+              ninja -C build-android-aarch64 &> "$workdir/ninja_log" || { tail -50 "$workdir/ninja_log"; exit 1; }
+          }
+
+          package() {
+              local suffix="$1"
+              local variant_name="8g2_ultra$suffix"
+              echo "Using patchelf to match soname ..."
+              cp "$workdir/mesa/build-android-aarch64/src/freedreno/vulkan/libvulkan_freedreno.so" "$workdir"
+              cd "$workdir"
+              patchelf --set-soname vulkan.adreno.so libvulkan_freedreno.so
+              mv libvulkan_freedreno.so vulkan.ad07XX.so
+              [ -a vulkan.ad07XX.so ] || { echo "Build failed!"; exit 1; }
+              rm -rf "$packagedir" && mkdir -p "$packagedir"
+              local date_disp filename
+              date_disp=$(date +'%b %d, %Y')
+              filename="turnip_$(date +'%b-%d-%Y')_${commit_short}_${variant_name}"
+              cat <<EOF >"$packagedir/meta.json"
+          {
+            "schemaVersion": 1,
+            "name": "Turnip 8G2 Ultra$suffix - $date_disp - $commit_short",
+            "description": "Latest mesa + 8g2 UI glitch fix (Adreno 740 tp ubwc flag hint)$([ "$suffix" == "_sysmem" ] && echo ' + forced sysmem rendering') - Weab-chan 8g2 line successor",
+            "author": "8g2-turnip-one-shot",
+            "packageVersion": "$mesa_version",
+            "vendor": "Mesa",
+            "driverVersion": "$mesa_version/vk$vulkan_version",
+            "minApi": 30,
+            "libraryName": "vulkan.ad07XX.so"
+          }
+          EOF
+              cp "$workdir/vulkan.ad07XX.so" "$packagedir"
+              echo "正在打包 $filename.zip ..."
+              cd "$packagedir"
+              zip -9 "$workdir/$filename.zip" ./*
+              cd "$workdir"
+              [ -a "$filename.zip" ] || { echo "打包失败！"; exit 1; }
+              echo "完成: $filename.zip"
+          }
+
+          write_release_meta() {
+              cd "$workdir"
+              cat <
+          ### 基础提交：[$commit_short](https://gitlab.freedesktop.org/mesa/mesa/-/commit/$commit)
+          ### Mesa $mesa_version / Vulkan $vulkan_version - Snapdragon 8 Gen 2 (Adreno 740) 构建
+
+          - 最新上游 mesa main
+          - 8g2 修复：\`8g2_ui_glitch.patch\` - Adreno 740（Weab-chan 衍生版）上的 \`enable_tp_ubwc_flag_hint = True\`
+          - `applied_patches.diff` = 本次构建与上游 mesa 的完整差异（证明修复已包含）
+
+          ## 下载
+          - \`*_8g2_ultra.zip\` - 推荐
+          - \`*_8g2_ultra_sysmem.zip\` - 实验性，强制系统内存渲染
+          EOF
+              echo "Turnip 8G2 Ultra - $mesa_version - $(date +'%b %d, %Y') [$commit_short]" > release_name
+              echo "v8g2-ultra-$mesa_version-$commit_short" > tag
+          }
+
+          检查依赖
+          克隆梅萨
+          apply_patch_strict "base_patch" "freedreno_devices.py" "a7xx_gen2, GPUProps(enable_tp_ubwc_flag_hint = True)"
+          设置 NDK
+          构建
+          包 ""
+          apply_patch_strict "$sysmem_patch" "tu_cmd_buffer.cc" "   return true;"
+          构建
+          包 "_sysmem"
+          写入发布元数据
+          echo "全部完成"
+
+      - id: rel
+        名称: 获取发布信息
+        运行: |
+          echo "name=$(cat turnip_workdir/release_name)" >> "$GITHUB_OUTPUT"
+          echo "tag=$(cat turnip_workdir/tag)" >> "$GITHUB_OUTPUT"
+
+      - 名称: 发布版本
+        使用: softprops/action-gh-release@v2
+        与:
+          名称: ${{ steps.rel.outputs.name }}
+          tag_name: ${{ steps.rel.outputs.tag }}
+          body_path: turnip_workdir/description.md
+          文件: |
+            turnip_workdir/turnip_*_8g2_ultra*.zip
+            turnip_workdir/applied_patches.diff
+        环境:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
