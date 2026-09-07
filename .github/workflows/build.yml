@@ -197,58 +197,58 @@ jobs:
           }
           EOF
               cp "$workdir/vulkan.ad07XX.so" "$packagedir"
-              echo "正在打包 $filename.zip ..."
+              echo "Packing $filename.zip ..."
               cd "$packagedir"
               zip -9 "$workdir/$filename.zip" ./*
               cd "$workdir"
-              [ -a "$filename.zip" ] || { echo "打包失败！"; exit 1; }
-              echo "完成: $filename.zip"
+              [ -a "$filename.zip" ] || { echo "Packing failed!"; exit 1; }
+              echo "Done: $filename.zip"
           }
 
           write_release_meta() {
               cd "$workdir"
-              cat <
-          ### 基础提交：[$commit_short](https://gitlab.freedesktop.org/mesa/mesa/-/commit/$commit)
-          ### Mesa $mesa_version / Vulkan $vulkan_version - Snapdragon 8 Gen 2 (Adreno 740) 构建
+              cat <<EOF >description.md
+          ### Base commit : [$commit_short](https://gitlab.freedesktop.org/mesa/mesa/-/commit/$commit)
+          ### Mesa $mesa_version / Vulkan $vulkan_version - Snapdragon 8 Gen 2 (Adreno 740) build
 
-          - 最新上游 mesa main
-          - 8g2 修复：\`8g2_ui_glitch.patch\` - Adreno 740（Weab-chan 衍生版）上的 \`enable_tp_ubwc_flag_hint = True\`
-          - `applied_patches.diff` = 本次构建与上游 mesa 的完整差异（证明修复已包含）
+          - Latest upstream mesa main
+          - 8g2 fix: \`8g2_ui_glitch.patch\` - \`enable_tp_ubwc_flag_hint = True\` on Adreno 740 (Weab-chan lineage)
+          - \`applied_patches.diff\` = full diff of this build vs upstream mesa (proof the fix is in)
 
-          ## 下载
-          - \`*_8g2_ultra.zip\` - 推荐
-          - \`*_8g2_ultra_sysmem.zip\` - 实验性，强制系统内存渲染
+          ## Downloads
+          - \`*_8g2_ultra.zip\` - recommended
+          - \`*_8g2_ultra_sysmem.zip\` - experimental, forces sysmem rendering
           EOF
               echo "Turnip 8G2 Ultra - $mesa_version - $(date +'%b %d, %Y') [$commit_short]" > release_name
               echo "v8g2-ultra-$mesa_version-$commit_short" > tag
           }
 
-          检查依赖
-          克隆梅萨
-          apply_patch_strict "base_patch" "freedreno_devices.py" "a7xx_gen2, GPUProps(enable_tp_ubwc_flag_hint = True)"
-          设置 NDK
-          构建
-          包 ""
+          check_deps
+          clone_mesa
+          apply_patch_strict "$base_patch" "freedreno_devices.py" "a7xx_gen2, GPUProps(enable_tp_ubwc_flag_hint = True)"
+          setup_ndk
+          build
+          package ""
           apply_patch_strict "$sysmem_patch" "tu_cmd_buffer.cc" "   return true;"
-          构建
-          包 "_sysmem"
-          写入发布元数据
-          echo "全部完成"
+          build
+          package "_sysmem"
+          write_release_meta
+          echo "ALL DONE"
 
       - id: rel
-        名称: 获取发布信息
-        运行: |
+        name: Get release info
+        run: |
           echo "name=$(cat turnip_workdir/release_name)" >> "$GITHUB_OUTPUT"
           echo "tag=$(cat turnip_workdir/tag)" >> "$GITHUB_OUTPUT"
 
-      - 名称: 发布版本
-        使用: softprops/action-gh-release@v2
-        与:
-          名称: ${{ steps.rel.outputs.name }}
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.rel.outputs.name }}
           tag_name: ${{ steps.rel.outputs.tag }}
           body_path: turnip_workdir/description.md
-          文件: |
+          files: |
             turnip_workdir/turnip_*_8g2_ultra*.zip
             turnip_workdir/applied_patches.diff
-        环境:
+        env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
